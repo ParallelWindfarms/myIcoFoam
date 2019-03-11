@@ -18,3 +18,7 @@ Assuming you have OpenFOAM installed,
 # Running
 
 The `elbow` example is included here. To run it, first generate the mesh using `fluentMeshToFoam elbow.msh`, then run `myIcoFoam`.
+
+# Copying
+
+This repository includes parts of OpenFOAM-6 which is GPL3. This repository falls under the same, see `LICENSE` file.
