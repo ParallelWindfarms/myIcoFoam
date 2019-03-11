@@ -1,0 +1,4 @@
+icoFoam.C
+ddtEuler/EulerDdtSchemes.C
+
+EXE = $(FOAM_APPBIN)/myIcoFoam
