@@ -21,14 +21,25 @@ I will use the following libraries:
 
 # Parareal
 
-``` {.c++ file=src/parareal.hh}
+``` {.c++ file=src/types.hh}
 #pragma once
+#include <functional>
+#include <vector>
+#include <cassert>
 
 namespace pint
 {
     <<ode-type>>
-    <<integrator-type>>
+    <<method-type>>
+}
+```
 
+``` {.c++ file=src/parareal.hh}
+#pragma once
+#include "types.hh"
+
+namespace pint
+{
     <<time-decomposition>>
 }
 ```
@@ -65,7 +76,7 @@ using ODE = std::function
       , vector_t const & ) >;
 ```
 
-and the Jacobian (when its needed)
+and the Jacobian (when its needed by the method)
 
 $$J_{ij} = \frac{\partial f_i(t, y(t))}{\partial y_j},$$
 
@@ -112,13 +123,41 @@ TimeDecomposition<real_t> make_decomposition
 >
 > $$y = \mathcal{G}(y_j, t_j, t_{j+1}).$$
 
-``` {.c++ #integrator-type}
+The function $\mathcal{G}$ in this instance is created from the ODE, so we say $\mathcal{G}$ has the type `Integral`, while the solver (returning an integral) will have type `Method`.
+
+``` {.c++ #method-type}
 template <typename real_t, typename vector_t>
-using Integrator = std::function
+using Integral = std::function
     < vector_t
-      ( vector_t
+      ( vector_t const &
       , real_t
       , real_t ) >;
+
+<<solve-function>>
+
+template <typename real_t, typename vector_t>
+using Method = std::function
+    < Integral<real_t, vector_t> 
+      ( ODE<real_t, vector_t> ) >;
+```
+
+In general we will want to solve the ODE for a range of times. The following convenience function takes an integral, a $y_0$ and a range of times $t_i$, and returns $y_i$.
+
+``` {.c++ #solve-function}
+template <typename real_t, typename vector_t>
+std::vector<vector_t> solve
+    ( Integral<real_t, vector_t> step
+    , vector_t const &y_0
+    , std::vector<real_t> const &t )
+{
+    assert(t.size() > 0);
+    std::vector<vector_t> y(t.size());
+    y[0] = y_0;
+    for (unsigned i = 1; i < t.size(); ++i) {
+        y[i] = step(y[i-1], t[i-1], t[i]);
+    }
+    return y;
+}
 ```
 
 > Serial time integration with the fine method would then correspond to a step-by-step computation of
@@ -133,3 +172,76 @@ using Integrator = std::function
 >
 > In the Parareal iteration, the computationally expensive evaluation of $\mathcal{F}(y^k_j, t_j, t_{j+1})$ can be performed in parallel on $P$ processing units. By contrast, the dependency of $y^{k+1}_{j+1}$ on $\mathcal{G}(y^{k+1}_j, t_j, t_{j+1})$ means that the coarse correction has to be computed in serial order.
 
+# Runge-Kutta Method
+
+``` {.c++ file=src/runge-kutta.hh}
+#pragma once
+#include "types.hh"
+
+namespace pint
+{
+    <<runge-kutta-4>>
+}
+```
+
+``` {.c++ #runge-kutta-4}
+template <typename real_t, typename vector_t>
+Integral<real_t, vector_t> runge_kutta_4
+    ( ODE<real_t, vector_t> f )
+{
+    return [=]
+        ( vector_t const &y
+        , real_t t_init
+        , real_t t_end )
+    {
+        real_t   t  = t_init,
+                 h  = t_end - t_init;
+        vector_t k1 = h * f(t, y),
+                 k2 = h * f(t + h/2, y + k1/2),
+                 k3 = h * f(t + h/2, y + k2/2),
+                 k4 = h * f(t + h, y + k3);
+        return y + (k1 + 2*k2 + 2*k3 + k4) / 6;
+    };
+}
+```
+
+Let's solve the test problem
+
+$$y' = tan(y) + 1,\ with y_0 = 1, t = [1, 1.1]$$
+
+``` {.c++ file=src/test-rk4.cc}
+#include "runge-kutta.hh"
+#include <vector>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+
+using namespace pint;
+
+template <typename real_t>
+std::vector<real_t> linspace(real_t start, real_t end, unsigned n)
+{
+    std::vector<real_t> x(n);
+    for (unsigned i = 0; i < n; ++i) {
+        x[i] = start + (end * i - start * i) / (n - 1);
+    }
+    return x;
+}
+
+int main()
+{
+    using real_t = double;
+    unsigned n = 100;
+    auto ts = linspace<real_t>(1.0, 1.1, n);
+    ODE<real_t, real_t> f = [] (real_t t, real_t y) {
+        return tan(y) + 1;
+    };
+
+    auto y = solve(runge_kutta_4(f), 1.0, ts);
+
+    for (unsigned i = 0; i < n; ++i) {
+        std::cout << ts[i] << " " << y[i] << std::endl;
+    }
+    return EXIT_SUCCESS;
+}
+```
