@@ -26,21 +26,12 @@ I will use the following libraries:
 #include <functional>
 #include <vector>
 #include <cassert>
+#include <iostream>
 
 namespace pint
 {
     <<ode-type>>
     <<method-type>>
-}
-```
-
-``` {.c++ file=src/parareal.hh}
-#pragma once
-#include "types.hh"
-
-namespace pint
-{
-    <<time-decomposition>>
 }
 ```
 
@@ -93,37 +84,12 @@ using Jacobian = std::function
 > $$[t_0, T] = [t_0, t_1] \cup [t_1, t_2] \cup \ldots \cup [t_{P-1}, t_{P} ].$$
 >
 > Each time slice is assigned to one processing unit when parallelizing the algorithm, so that $P$ is equal to the number of processing units used for Parareal.
-
-``` {.c++ #time-decomposition}
-template <typename real_t>
-using TimeDecomposition = std::vector<std::tuple<real_t, real_t>>;
-```
-
-We can generate a equidistant time decompostion given an interval $[t_{\rm init}, t_{\rm end}]$ and a number of slices $P$.
-
-``` {.c++ #time-decomposition}
-template <typename real_t>
-TimeDecomposition<real_t> make_decomposition
-    ( real_t t_init
-    , real_t t_end
-    , unsigned P )
-{
-    TimeDecomposition d;
-    real_t dt = (t_end - t_init) / P;
-    real_t t  = t_init;
-
-    for (unsigned i = 0; i < P; ++i) {
-        d.emplace_back(t, t + dt);
-        t += dt;
-    }
-}
-```
-
+>
 > Parareal is based on the iterative application of two methods for integration of ordinary differential equations. One, commonly labelled ${\mathcal {F}}$, should be of high accuracy and computational cost while the other, typically labelled ${\mathcal {G}}$, must be computationally cheap but can be much less accurate. Typically, some form of Runge-Kutta method is chosen for both coarse and fine integrator, where ${\mathcal {G}}$ might be of lower order and use a larger time step than ${\mathcal {F}}$. If the initial value problem stems from the discretization of a PDE, ${\mathcal {G}}$ can also use a coarser spatial discretization, but this can negatively impact convergence unless high order interpolation is used. The result of numerical integration with one of these methods over a time slice $[t_{j}, t_{j+1}]$ for some starting value $y_{j}$ given at $t_{j}$ is then written as
 >
-> $$y = \mathcal{G}(y_j, t_j, t_{j+1}).$$
+> $$y = \mathcal{F}(y_j, t_j, t_{j+1})\ {\rm or}\ y = \mathcal{G}(y_j, t_j, t_{j+1}).$$
 
-The function $\mathcal{G}$ in this instance is created from the ODE, so we say $\mathcal{G}$ has the type `Integral`, while the solver (returning an integral) will have type `Method`.
+The function $\mathcal{G}$ in this instance is created from the ODE, so we say $\mathcal{G}$ has the type `Integral`, while the solver (returning an integral) will have type `StepMethod`.
 
 ``` {.c++ #method-type}
 template <typename real_t, typename vector_t>
@@ -136,9 +102,48 @@ using Integral = std::function
 <<solve-function>>
 
 template <typename real_t, typename vector_t>
-using Method = std::function
+using StepMethod = std::function
     < Integral<real_t, vector_t> 
       ( ODE<real_t, vector_t> ) >;
+
+template <typename real_t, typename vector_t>
+Integral<real_t, vector_t> iterate_step
+    ( Integral<real_t, vector_t> step
+    , real_t h )
+{
+    return [=]
+        ( vector_t const &y_0
+        , real_t t_init
+        , real_t t_end ) -> vector_t
+    {
+        real_t t = t_init;
+        vector_t y = y_0;
+        while (t + h < t_end) {
+            y = step(y, t, t + h);
+            t += h;
+        }
+        return step(y, t, t_end);
+    };
+}
+```
+
+The easiest example is the forward Euler method.
+
+$$y_{i + 1} = y_i + h f(t_i, y_i)$$
+
+``` {.c++ #forward-euler-method}
+template <typename real_t, typename vector_t>
+Integral<real_t, vector_t> forward_euler
+    ( ODE<real_t, vector_t> f )
+{
+    return [=]
+        ( vector_t const &y
+        , real_t t_init
+        , real_t t_end ) -> vector_t
+    {
+        return y + (t_end - t_init) * f(t_init, y);
+    };
+}
 ```
 
 In general we will want to solve the ODE for a range of times. The following convenience function takes an integral, a $y_0$ and a range of times $t_i$, and returns $y_i$.
@@ -158,6 +163,16 @@ std::vector<vector_t> solve
     }
     return y;
 }
+
+template <typename real_t>
+std::vector<real_t> linspace(real_t start, real_t end, unsigned n)
+{
+    std::vector<real_t> x(n);
+    for (unsigned i = 0; i < n; ++i) {
+        x[i] = start + (end * i - start * i) / (n - 1);
+    }
+    return x;
+}
 ```
 
 > Serial time integration with the fine method would then correspond to a step-by-step computation of
@@ -172,19 +187,49 @@ std::vector<vector_t> solve
 >
 > In the Parareal iteration, the computationally expensive evaluation of $\mathcal{F}(y^k_j, t_j, t_{j+1})$ can be performed in parallel on $P$ processing units. By contrast, the dependency of $y^{k+1}_{j+1}$ on $\mathcal{G}(y^{k+1}_j, t_j, t_{j+1})$ means that the coarse correction has to be computed in serial order.
 
-# Runge-Kutta Method
+``` {.c++ #parareal-method}
+template <typename real_t, typename vector_t>
+using IterationStep = std::function
+    < std::vector<vector_t>
+          ( std::vector<vector_t> const &
+          , std::vector<real_t> const & ) >;
 
-``` {.c++ file=src/runge-kutta.hh}
-#pragma once
-#include "types.hh"
-
-namespace pint
+template <typename real_t, typename vector_t>
+IterationStep<real_t, vector_t> parareal
+    ( Integral<real_t, vector_t> coarse
+    , Integral<real_t, vector_t> fine )
 {
-    <<runge-kutta-4>>
+    return [=]
+        ( std::vector<vector_t> const &y
+        , std::vector<real_t> const &t ) -> std::vector<vector_t>
+    {
+        unsigned m = t.size();
+        std::vector<vector_t> y_next(m);
+
+        y_next[0] = y[0];
+        for (unsigned i = 1; i < m; ++i) {
+            y_next[i] = coarse(y_next[i-1], t[i-1], t[i])
+                        + fine(y[i-1], t[i-1], t[i])
+                        - coarse(y[i-1], t[i-1], t[i]);
+        }
+        return y_next;
+    };
 }
 ```
 
-``` {.c++ #runge-kutta-4}
+# Runge-Kutta Method
+
+The fourth order Runge-Kutta method is given as follows
+
+$$\begin{aligned}
+k_1 &= h f(t_i, y_i)\\
+k_2 &= h f(t_i + h/2, y_i + k_1 / 2)\\
+k_3 &= h f(t_i + h/2, y_i + k_2 / 2)\\
+k_4 &= h f(t_i + h, y_i + k_3)\\
+y_{i+1} &= y_i + (k_1 + 2k_2 + 2k_3 + k_4) / 6
+\end{aligned}$$
+
+``` {.c++ #runge-kutta-4-method}
 template <typename real_t, typename vector_t>
 Integral<real_t, vector_t> runge_kutta_4
     ( ODE<real_t, vector_t> f )
@@ -192,7 +237,7 @@ Integral<real_t, vector_t> runge_kutta_4
     return [=]
         ( vector_t const &y
         , real_t t_init
-        , real_t t_end )
+        , real_t t_end ) -> vector_t
     {
         real_t   t  = t_init,
                  h  = t_end - t_init;
@@ -205,43 +250,143 @@ Integral<real_t, vector_t> runge_kutta_4
 }
 ```
 
-Let's solve the test problem
+Let's test the integrator on a damped oscillator
 
-$$y' = tan(y) + 1,\ with y_0 = 1, t = [1, 1.1]$$
+$$y'' + 2\zeta \omega_0 y' + \omega_0^2 y = 0,$$
+
+where $\omega_0 = \sqrt{k/m}$ and $\zeta = c / 2\sqrt{mk}$, $k$ being the spring constant, $m$ the test mass and $c$ the friction constant.
+
+To solve this second order ODE we need to introduce a second variable to solve for. Say $q = y$ and $p = y'$.
+
+$$\begin{aligned}
+    q' &= p\\
+    p' &= -2\zeta \omega_0 p + \omega_0^2 q
+\end{aligned}$$
+
+``` {.c++ #harmonic-oscillator}
+template <typename real_t, typename vector_t>
+ODE<real_t, vector_t> harmonic_oscillator
+    ( real_t omega_0
+    , real_t zeta )
+{
+    return [=] (real_t t, vector_t const &y) {
+        return vector_t
+            ( y[1] 
+            , -2 * zeta * omega_0 * y[1] - omega_0*omega_0 * y[0] );
+    };
+}
+```
+
+## Synthesis
+
+``` {.c++ file=src/methods.hh}
+#pragma once
+#include "types.hh"
+
+namespace pint
+{
+    <<forward-euler-method>>
+    <<runge-kutta-4-method>>
+    <<parareal-method>>
+}
+```
 
 ``` {.c++ file=src/test-rk4.cc}
-#include "runge-kutta.hh"
+#include "methods.hh"
+#include "types.hh"
+
 #include <vector>
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
+#include <Eigen/Dense>
 
 using namespace pint;
 
-template <typename real_t>
-std::vector<real_t> linspace(real_t start, real_t end, unsigned n)
+<<harmonic-oscillator>>
+
+template <typename real_t, typename vector_t>
+std::vector<vector_t> solve_iterative
+    ( IterationStep<real_t, vector_t> step
+    , std::vector<vector_t> const &y_0
+    , std::vector<real_t> const &t
+    , unsigned n )
 {
-    std::vector<real_t> x(n);
+    std::vector<vector_t> y = y_0;
     for (unsigned i = 0; i < n; ++i) {
-        x[i] = start + (end * i - start * i) / (n - 1);
+        y = step(y, t);
     }
-    return x;
+    return y;
 }
 
 int main()
 {
     using real_t = double;
-    unsigned n = 100;
-    auto ts = linspace<real_t>(1.0, 1.1, n);
-    ODE<real_t, real_t> f = [] (real_t t, real_t y) {
-        return tan(y) + 1;
-    };
+    using vector_t = Eigen::Vector2d;
 
-    auto y = solve(runge_kutta_4(f), 1.0, ts);
+    unsigned n = 21;
+    auto ts = linspace<real_t>(0, 15.0, n);
+
+    auto ode = harmonic_oscillator<real_t, vector_t>(1.0, 0.5);
+    auto coarse = runge_kutta_4<real_t, vector_t>(ode);
+    auto fine = iterate_step<real_t, vector_t>(coarse, 0.01); 
+    auto y_0 = solve(coarse, vector_t(1.0, 0.0), ts);
+
+    auto y = solve_iterative
+        ( parareal(coarse, fine)
+        , y_0
+        , ts
+        , 5 );
 
     for (unsigned i = 0; i < n; ++i) {
-        std::cout << ts[i] << " " << y[i] << std::endl;
+        std::cout << ts[i] << " " << y[i][0] << " " << y[i][1] << std::endl;
     }
     return EXIT_SUCCESS;
 }
+```
+
+# Building
+
+``` {.makefile file=Makefile}
+# allow spaces for indenting
+.RECIPEPREFIX +=
+
+# find sources
+build_dir = ./build
+cc_files = $(shell find ./src -name *.cc)
+obj_files = $(cc_files:%.cc=$(build_dir)/%.o)
+dep_files = $(obj_files:%.o=%.d)
+
+# set compiler
+compile = g++
+link = g++
+
+# libfmt
+fmtlib_lflags = -lfmt
+
+# eigen3
+eigen_lflags = $(shell pkg-config --libs eigen3)
+eigen_cflags = $(shell pkg-config --cflags eigen3)
+
+# compile and link flags
+compile_flags = -g -std=c++17 -Wall -Werror $(eigen_cflags)
+link_flags = $(fmt_lflags) $(eigen_lflags)
+
+# rules
+.PHONY: clean build
+
+build: parareal
+
+clean:
+    rm -rf $(build_dir)
+
+-include $(dep_files)
+
+$(build_dir)/%.o: %.cc Makefile
+    @mkdir -p $(@D)
+    $(compile) $(compile_flags) -MMD -c $< -o $@
+
+parareal: $(obj_files)
+    @mkdir -p $(@D)
+    $(link) $^ $(link_flags) -o $@
 ```

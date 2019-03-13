@@ -3,6 +3,7 @@
 #include <functional>
 #include <vector>
 #include <cassert>
+#include <iostream>
 
 namespace pint
 {
@@ -50,12 +51,42 @@ namespace pint
         }
         return y;
     }
+    
+    template <typename real_t>
+    std::vector<real_t> linspace(real_t start, real_t end, unsigned n)
+    {
+        std::vector<real_t> x(n);
+        for (unsigned i = 0; i < n; ++i) {
+            x[i] = start + (end * i - start * i) / (n - 1);
+        }
+        return x;
+    }
     // ------ end
     
     template <typename real_t, typename vector_t>
-    using Method = std::function
+    using StepMethod = std::function
         < Integral<real_t, vector_t> 
           ( ODE<real_t, vector_t> ) >;
+    
+    template <typename real_t, typename vector_t>
+    Integral<real_t, vector_t> iterate_step
+        ( Integral<real_t, vector_t> step
+        , real_t h )
+    {
+        return [=]
+            ( vector_t const &y_0
+            , real_t t_init
+            , real_t t_end ) -> vector_t
+        {
+            real_t t = t_init;
+            vector_t y = y_0;
+            while (t + h < t_end) {
+                y = step(y, t, t + h);
+                t += h;
+            }
+            return step(y, t, t_end);
+        };
+    }
     // ------ end
 }
 // ------ end
