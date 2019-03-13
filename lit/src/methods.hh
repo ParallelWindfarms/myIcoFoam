@@ -56,12 +56,12 @@ namespace pint
         {
             unsigned m = t.size();
             std::vector<vector_t> y_next(m);
-
+    
             y_next[0] = y[0];
             for (unsigned i = 1; i < m; ++i) {
                 y_next[i] = coarse(y_next[i-1], t[i-1], t[i])
-                            + fine(y[i-1], t[i-1], t[i])
-                            - coarse(y[i-1], t[i-1], t[i]);
+                          + fine(y[i-1], t[i-1], t[i])
+                          - coarse(y[i-1], t[i-1], t[i]);
             }
             return y_next;
         };

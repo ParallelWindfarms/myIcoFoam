@@ -209,8 +209,8 @@ IterationStep<real_t, vector_t> parareal
         y_next[0] = y[0];
         for (unsigned i = 1; i < m; ++i) {
             y_next[i] = coarse(y_next[i-1], t[i-1], t[i])
-                        + fine(y[i-1], t[i-1], t[i])
-                        - coarse(y[i-1], t[i-1], t[i]);
+                      + fine(y[i-1], t[i-1], t[i])
+                      - coarse(y[i-1], t[i-1], t[i]);
         }
         return y_next;
     };
@@ -295,6 +295,8 @@ namespace pint
 #include "methods.hh"
 #include "types.hh"
 
+#include <argagg/argagg.hpp>
+
 #include <vector>
 #include <cstdlib>
 #include <cmath>
@@ -310,39 +312,108 @@ std::vector<vector_t> solve_iterative
     ( IterationStep<real_t, vector_t> step
     , std::vector<vector_t> const &y_0
     , std::vector<real_t> const &t
-    , unsigned n )
+    , real_t abs_err
+    , unsigned max_iter )
 {
     std::vector<vector_t> y = y_0;
-    for (unsigned i = 0; i < n; ++i) {
-        y = step(y, t);
+
+    for (unsigned i = 0; i < t.size(); ++i) {
+        std::cout << t[i] << " " << y[i][0] << " " << y[i][1] << std::endl;
+    }
+    std::cout << "\n\n";
+
+    for (unsigned i = 0; i < max_iter; ++i) {
+        auto y_next = step(y, t);
+        real_t max_err = 0.0;
+        for (unsigned i = 0; i < t.size(); ++i) {
+            real_t err = (y_next[i] - y[i]).norm();
+            max_err = (err > max_err ? err : max_err);
+        }
+        y = y_next;
+
+        std::cout << "# iteration=" << i + 1
+                  << " max_abs_err=" << max_err << "\n";
+        for (unsigned i = 0; i < t.size(); ++i) {
+            std::cout << t[i] << " " << y[i][0] << " " << y[i][1] << std::endl;
+        }
+        std::cout << "\n\n";
     }
     return y;
 }
 
-int main()
+int main(int argc, char **argv)
 {
+    argagg::parser argparser
+        {{ { "help",   {"-h", "--help"}
+           , "shows this help message", 0 }
+         , { "omega0", {"--omega0"}
+           , "undamped angular frequency (default 1.0)", 1 }
+         , { "zeta",   {"--zeta"}
+           , "damping ratio (default 0.5)", 1 }
+         , { "n",      {"--n"}
+           , "number of time slices (default 9)", 1 }
+         , { "h",      {"--h"}
+           , "size of time step in fine integrator (default 0.01)", 1 }
+        }};
+    
+    argagg::parser_results args;
+    try {
+        args = argparser.parse(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    if (args["help"]) {
+        std::cerr << "Parareal test case: harmonic oscillator\n";
+        std::cerr << argparser;
+        return EXIT_SUCCESS;
+    }
+
     using real_t = double;
     using vector_t = Eigen::Vector2d;
 
-    unsigned n = 21;
-    auto ts = linspace<real_t>(0, 15.0, n);
+    unsigned n    = args["n"].as<unsigned>(9);
+    real_t h      = args["h"].as<real_t>(0.01);
+    real_t omega0 = args["omega0"].as<real_t>(1.0);
+    real_t zeta   = args["zeta"].as<real_t>(0.5);
 
-    auto ode = harmonic_oscillator<real_t, vector_t>(1.0, 0.5);
+    auto ts = linspace<real_t>(0, 15.0, n);
+    auto ode = harmonic_oscillator<real_t, vector_t>(omega0, zeta);
     auto coarse = runge_kutta_4<real_t, vector_t>(ode);
-    auto fine = iterate_step<real_t, vector_t>(coarse, 0.01); 
+    auto fine = iterate_step<real_t, vector_t>(coarse, h); 
     auto y_0 = solve(coarse, vector_t(1.0, 0.0), ts);
+
+    auto t_ref = linspace<real_t>(0, 15.0, 100);
+    auto y_ref = solve(fine, vector_t(1.0, 0.0), t_ref);
+    for (unsigned i = 0; i < t_ref.size(); ++i) {
+        std::cout << t_ref[i] << " " << y_ref[i][0] << " " << y_ref[i][1] << std::endl;
+    }
+    std::cout << "\n\n";
 
     auto y = solve_iterative
         ( parareal(coarse, fine)
         , y_0
         , ts
-        , 5 );
+        , 1e-6
+        , n );
 
-    for (unsigned i = 0; i < n; ++i) {
-        std::cout << ts[i] << " " << y[i][0] << " " << y[i][1] << std::endl;
-    }
     return EXIT_SUCCESS;
 }
+```
+
+## Test results
+
+``` {.gnuplot file=plot1.gp}
+set term pdf font "Bitstream Charter"
+set output 'plot1.pdf'
+
+plot '< ./parareal' \
+       i 0 w l lc 'black' lw 2 t 'runge-kutta-4, h=0.01', \
+    '' i 1 w lp t'parareal n=0', \
+    '' i 2 w lp t'parareal n=1', \
+    '' i 3 w lp t'parareal n=2', \
+    '' i 4 w lp ls 6 t'parareal n=3'
 ```
 
 # Building
@@ -369,7 +440,7 @@ eigen_lflags = $(shell pkg-config --libs eigen3)
 eigen_cflags = $(shell pkg-config --cflags eigen3)
 
 # compile and link flags
-compile_flags = -g -std=c++17 -Wall -Werror $(eigen_cflags)
+compile_flags = -O3 -std=c++17 -Wall -Werror $(eigen_cflags)
 link_flags = $(fmt_lflags) $(eigen_lflags)
 
 # rules
